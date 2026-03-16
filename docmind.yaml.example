@@ -1,0 +1,87 @@
+# DocMind Configuration File
+# Copy this file to your project root and rename to 'docmind.yaml'
+
+# Project information (optional - will be extracted from code if not provided)
+project:
+  name: ""                  # Project name (empty = auto-extract from pyproject.toml)
+  version: ""               # Version (empty = auto-extract)
+  description: ""           # Description (empty = auto-extract)
+  author: ""                # Author (empty = auto-extract)
+
+# Custom requirements file
+# A Markdown file where you can specify custom formatting and content requirements
+custom_requirements:
+  file: "docmind-requirements.md"    # Path to custom requirements file (empty = disabled)
+  apply_to:
+    user_guide: true                 # Apply requirements to user guide
+    dev_guide: true                  # Apply requirements to developer guide
+
+# Output configuration
+output:
+  user_guide: "user-guide.md"        # Output file name for user guide
+  dev_guide: "dev-guide.md"          # Output file name for developer guide
+  language: "zh-CN"                  # Output language: zh-CN, en-US, etc.
+
+# Code analysis configuration
+analyzer:
+  source_dir: "."                    # Source code directory (relative to project root)
+  exclude:                           # Directories and files to exclude
+    - "tests/"
+    - "examples/"
+    - "docs/"
+    - "**/migrations/"
+    - "**/__pycache__/"
+    - "**/*.egg-info/"
+    - "**/venv/"
+    - "**/.venv/"
+    - "**/node_modules/"
+  include_private: false             # Include private methods (starting with _)
+
+# LLM configuration (vLLM OpenAI-compatible mode)
+# Supports: vLLM, Ollama, OpenAI, and other OpenAI-compatible services
+llm:
+  base_url: "http://localhost:8000/v1"   # API endpoint URL
+  model: "Qwen/Qwen2.5-72B-Instruct"     # Model name
+  api_key: "EMPTY"                        # API key (use "EMPTY" for local vLLM/Ollama)
+  temperature: 0.7                        # Generation temperature
+  max_tokens: 4096                        # Maximum tokens per response
+  timeout: 300                            # Request timeout in seconds
+
+# Embedding model configuration
+# Provider options:
+#   - "local": Use sentence-transformers for local inference (fully offline)
+#   - "openai": Use OpenAI or OpenAI-compatible embedding API
+embedder:
+  provider: "local"                   # "local" or "openai"
+  model: "BAAI/bge-m3"                # Model name
+  device: "cuda"                      # For local: cuda, cpu, or auto
+  batch_size: 32                      # Batch size for encoding
+  max_length: 512                     # For local: max sequence length
+  # --- For "openai" provider ---
+  # api_key: "sk-xxx"                 # API key (required for openai)
+  # base_url: ""                      # Custom API endpoint (optional)
+  # dimensions: null                  # Output dimensions (for text-embedding-3-*)
+  # timeout: 60                       # API timeout in seconds
+
+# Retrieval configuration
+retriever:
+  top_k: 15                  # Number of code chunks to retrieve per query
+
+# Text splitting configuration
+splitter:
+  chunk_size: 500            # Target chunk size in tokens
+  chunk_overlap: 100         # Overlap between chunks in tokens
+
+# Document generation configuration
+generator:
+  user_guide:
+    include_installation: true      # Include installation guide
+    include_quickstart: true        # Include quick start section
+    include_examples: true          # Include usage examples
+  dev_guide:
+    include_architecture: true      # Include architecture overview
+    include_api: true               # Include API reference
+    include_contributing: true      # Include contribution guide
+  mermaid:
+    enabled: true                   # Generate Mermaid diagrams
+    max_diagrams: 5                 # Maximum diagrams per document
