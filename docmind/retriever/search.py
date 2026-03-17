@@ -192,18 +192,6 @@ class Retriever:
 
         self.index.save(path)
 
-    def load_index(self, path: Path, chunks: list[CodeChunk]) -> None:
-        """
-        Load the index from disk.
-
-        Args:
-            path: Path to the index file.
-            chunks: List of CodeChunk objects (must match the saved index).
-        """
-        self.index = FAISSIndex(dimension=1)  # Dummy dimension
-        self.index.load(path)
-        self.chunks = chunks
-
     def has_index(self) -> bool:
         """Check if an index has been built."""
         return self.index is not None and len(self.index) > 0

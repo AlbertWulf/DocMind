@@ -519,12 +519,12 @@ def generate(
 
         # Done
         progress.stop_progress()
-        progress.print()
+        progress.print("")
         progress.print_success("Documentation generation complete!")
         progress.print(f"Output directory: {output_path}")
 
     except KeyboardInterrupt:
-        progress.print()
+        progress.print("")
         progress.print_warning("Generation interrupted by user")
         raise typer.Exit(1)
     except Exception as e:

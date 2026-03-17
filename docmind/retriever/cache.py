@@ -223,10 +223,9 @@ class EmbeddingCache:
             "chunk_type": chunk.chunk_type,
             "content": chunk.content,
             "metadata": chunk.metadata,
-            "start_line": chunk.start_line,
-            "end_line": chunk.end_line,
+            "token_count": chunk.token_count,
         }
-    
+
     def _dict_to_chunk(self, data: dict) -> CodeChunk:
         """Convert dictionary to CodeChunk."""
         return CodeChunk(
@@ -234,8 +233,7 @@ class EmbeddingCache:
             chunk_type=data["chunk_type"],
             content=data["content"],
             metadata=data.get("metadata", {}),
-            start_line=data.get("start_line"),
-            end_line=data.get("end_line"),
+            token_count=data.get("token_count", 0),
         )
     
     def clear(self) -> None:
