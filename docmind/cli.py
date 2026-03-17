@@ -83,6 +83,34 @@ def init(
     console.print("3. Run: docmind generate /path/to/your/project")
 
 
+@app.command("clear-cache")
+def clear_cache(
+    project_path: Path = typer.Argument(
+        ...,
+        help="Path to the Python project directory",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        readable=True,
+    ),
+) -> None:
+    """
+    Clear the embedding cache for a project.
+
+    Use this when you want to force a full rebuild of embeddings.
+    """
+    from .retriever.cache import EmbeddingCache
+
+    project_path = project_path.resolve()
+    cache = EmbeddingCache(project_path)
+
+    if cache.exists():
+        cache.clear()
+        console.print(f"[green]✓[/green] Cache cleared for {project_path}")
+    else:
+        console.print(f"[yellow]No cache found for {project_path}[/yellow]")
+
+
 @app.command()
 def generate(
     project_path: Path = typer.Argument(
@@ -126,6 +154,11 @@ def generate(
         None,
         "--only",
         help="Generate only specified document type: 'user' or 'dev'",
+    ),
+    no_cache: bool = typer.Option(
+        False,
+        "--no-cache",
+        help="Disable embedding cache and rebuild from scratch",
     ),
     verbose: bool = typer.Option(
         False,
@@ -243,70 +276,123 @@ def generate(
 
             return
 
-        # Step 2: Extract code structures
-        progress.section("Extracting code structures")
-        progress.start_progress("Analyzing files", len(python_files))
+        # Step 2: Check cache / Build embeddings
+        from .retriever.cache import EmbeddingCache
 
-        all_chunks = []
-        splitter = TextSplitter(
+        cache = EmbeddingCache(project_path)
+        use_cache = not no_cache and cache.is_valid(
+            files=python_files,
+            embedder_model=config.embedder.model,
+            embedder_provider=config.embedder.provider,
             chunk_size=config.splitter.chunk_size,
             chunk_overlap=config.splitter.chunk_overlap,
         )
 
-        for i, py_file in enumerate(python_files):
-            try:
-                extractor = CodeExtractor(
-                    py_file,
-                    include_private=config.analyzer.include_private,
-                )
-                structure = extractor.extract()
-
-                # Split into chunks
-                chunks = splitter.split_code_structure(
-                    structure,
-                    str(py_file.relative_to(project_path)),
-                )
-                all_chunks.extend(chunks)
-
-                progress.update_progress("Analyzing files")
-            except SyntaxError as e:
-                progress.print_warning(f"Syntax error in {py_file}: {e}")
-            except Exception as e:
-                if verbose:
-                    progress.print_warning(f"Error processing {py_file}: {e}")
-
-        progress.complete_progress("Analyzing files")
-        progress.print(f"Extracted {len(all_chunks)} code chunks")
-
-        # Step 3: Build embeddings
-        progress.section("Building embeddings")
-
-        provider = config.embedder.provider
-        if provider == "openai":
-            progress.start(f"Connecting to embedding API ({config.embedder.model})...")
+        if use_cache:
+            progress.section("Loading cached embeddings")
+            progress.start("Loading from cache...")
+            
+            index, chunks = cache.load()
+            
+            # Initialize encoder (needed for queries)
+            encoder = Encoder(
+                provider=config.embedder.provider,
+                model=config.embedder.model,
+                device=config.embedder.device,
+                batch_size=config.embedder.batch_size,
+                max_length=config.embedder.max_length,
+                api_key=config.embedder.api_key or None,
+                base_url=config.embedder.base_url,
+                dimensions=config.embedder.dimensions,
+                timeout=config.embedder.timeout,
+            )
+            
+            retriever = Retriever(encoder, top_k=config.retriever.top_k)
+            retriever.load_index(index, chunks)
+            
+            progress.stop()
+            cache_info = cache.get_cache_info()
+            if cache_info:
+                progress.print_success(f"Loaded {cache_info['total_chunks']} chunks from cache")
         else:
-            progress.start(f"Loading embedding model ({config.embedder.model})...")
+            # Step 2a: Extract code structures
+            progress.section("Extracting code structures")
+            progress.start_progress("Analyzing files", len(python_files))
 
-        encoder = Encoder(
-            provider=config.embedder.provider,
-            model=config.embedder.model,
-            device=config.embedder.device,
-            batch_size=config.embedder.batch_size,
-            max_length=config.embedder.max_length,
-            api_key=config.embedder.api_key or None,
-            base_url=config.embedder.base_url,
-            dimensions=config.embedder.dimensions,
-            timeout=config.embedder.timeout,
-        )
+            all_chunks = []
+            splitter = TextSplitter(
+                chunk_size=config.splitter.chunk_size,
+                chunk_overlap=config.splitter.chunk_overlap,
+            )
 
-        progress.stop()
-        progress.start_progress("Encoding", len(all_chunks) // config.embedder.batch_size + 1)
+            for i, py_file in enumerate(python_files):
+                try:
+                    extractor = CodeExtractor(
+                        py_file,
+                        include_private=config.analyzer.include_private,
+                    )
+                    structure = extractor.extract()
 
-        retriever = Retriever(encoder, top_k=config.retriever.top_k)
-        retriever.build_index(all_chunks)
+                    # Split into chunks
+                    chunks = splitter.split_code_structure(
+                        structure,
+                        str(py_file.relative_to(project_path)),
+                    )
+                    all_chunks.extend(chunks)
 
-        progress.complete_progress("Encoding")
-        progress.print(f"Built index with {retriever.get_chunk_count()} chunks")
+                    progress.update_progress("Analyzing files")
+                except SyntaxError as e:
+                    progress.print_warning(f"Syntax error in {py_file}: {e}")
+                except Exception as e:
+                    if verbose:
+                        progress.print_warning(f"Error processing {py_file}: {e}")
+
+            progress.complete_progress("Analyzing files")
+            progress.print(f"Extracted {len(all_chunks)} code chunks")
+
+            # Step 2b: Build embeddings
+            progress.section("Building embeddings")
+
+            provider = config.embedder.provider
+            if provider == "openai":
+                progress.start(f"Connecting to embedding API ({config.embedder.model})...")
+            else:
+                progress.start(f"Loading embedding model ({config.embedder.model})...")
+
+            encoder = Encoder(
+                provider=config.embedder.provider,
+                model=config.embedder.model,
+                device=config.embedder.device,
+                batch_size=config.embedder.batch_size,
+                max_length=config.embedder.max_length,
+                api_key=config.embedder.api_key or None,
+                base_url=config.embedder.base_url,
+                dimensions=config.embedder.dimensions,
+                timeout=config.embedder.timeout,
+            )
+
+            progress.stop()
+            progress.start_progress("Encoding", len(all_chunks) // config.embedder.batch_size + 1)
+
+            retriever = Retriever(encoder, top_k=config.retriever.top_k)
+            retriever.build_index(all_chunks)
+
+            progress.complete_progress("Encoding")
+            progress.print(f"Built index with {retriever.get_chunk_count()} chunks")
+            
+            # Save to cache
+            progress.start("Saving to cache...")
+            cache.save(
+                index=retriever.index,
+                chunks=retriever.chunks,
+                files=python_files,
+                embedder_model=config.embedder.model,
+                embedder_provider=config.embedder.provider,
+                chunk_size=config.splitter.chunk_size,
+                chunk_overlap=config.splitter.chunk_overlap,
+            )
+            progress.stop()
+            progress.print_success("Cache saved")
 
         # Step 4: Initialize LLM
         progress.section("Connecting to LLM")

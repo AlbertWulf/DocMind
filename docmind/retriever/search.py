@@ -63,6 +63,17 @@ class Retriever:
         self.index = FAISSIndex(dimension=vectors.shape[1], index_type="flat")
         self.index.add(vectors)
 
+    def load_index(self, index: FAISSIndex, chunks: list[CodeChunk]) -> None:
+        """
+        Load an existing index with chunks.
+
+        Args:
+            index: Pre-built FAISS index.
+            chunks: List of CodeChunk objects matching the index.
+        """
+        self.index = index
+        self.chunks = chunks
+
     def search(self, query: str) -> list[SearchResult]:
         """
         Search for relevant chunks given a query string.
