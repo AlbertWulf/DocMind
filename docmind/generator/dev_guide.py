@@ -1,14 +1,15 @@
 """
-Developer guide generator.
+Developer guide generator with multi-stage generation support.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from ..analyzer.metadata import ProjectMeta
 from ..llm.client import LLMClient
 from ..retriever.search import Retriever
+from .outline import DocOutline, OutlineGenerator, SectionInfo
 from .prompts import PromptBuilder
 from .requirements import CustomRequirements, format_requirements_for_prompt
 
@@ -21,11 +22,17 @@ class DevGuideConfig:
     include_api: bool = True
     include_contributing: bool = True
     language: str = "zh-CN"
+    use_multi_stage: bool = True  # Enable multi-stage generation
+    max_section_tokens: int = 6000  # Max tokens per section context
 
 
 class DevGuideGenerator:
     """
     Generate developer documentation from code.
+    
+    Supports two generation modes:
+    1. Multi-stage (default): First generates outline, then generates each section
+    2. Single-stage: Generates entire document in one LLM call
     """
 
     def __init__(
@@ -48,24 +55,103 @@ class DevGuideGenerator:
         self.retriever = retriever
         self.prompt_builder = prompt_builder
         self.config = config or DevGuideConfig()
+        
+        # Initialize outline generator
+        self.outline_generator = OutlineGenerator(
+            llm_client=llm_client,
+            retriever=retriever,
+            prompt_builder=prompt_builder,
+        )
 
     def generate(
         self,
         project_meta: ProjectMeta,
+        file_tree: Optional[str] = None,
         custom_requirements: Optional[CustomRequirements] = None,
         existing_readme: Optional[str] = None,
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
     ) -> str:
         """
         Generate the complete developer guide.
 
         Args:
             project_meta: Project metadata.
+            file_tree: Project file tree string (optional, will be built if not provided).
             custom_requirements: Custom requirements from user.
             existing_readme: Content of existing README.md.
+            progress_callback: Callback for progress updates (section_title, current, total).
 
         Returns:
             Generated developer guide in Markdown format.
         """
+        if self.config.use_multi_stage:
+            return self._generate_multi_stage(
+                project_meta=project_meta,
+                file_tree=file_tree,
+                custom_requirements=custom_requirements,
+                existing_readme=existing_readme,
+                progress_callback=progress_callback,
+            )
+        else:
+            return self._generate_single_stage(
+                project_meta=project_meta,
+                custom_requirements=custom_requirements,
+                existing_readme=existing_readme,
+            )
+
+    def _generate_multi_stage(
+        self,
+        project_meta: ProjectMeta,
+        file_tree: Optional[str],
+        custom_requirements: Optional[CustomRequirements],
+        existing_readme: Optional[str],
+        progress_callback: Optional[Callable[[str, int, int], None]],
+    ) -> str:
+        """
+        Generate document using multi-stage approach.
+        
+        Stage 1: Generate outline
+        Stage 2: Generate each section
+        Stage 3: Assemble final document
+        """
+        # Build file tree if not provided
+        if file_tree is None:
+            file_tree = self._build_file_tree()
+        
+        # Stage 1: Generate outline
+        outline = self.outline_generator.generate_outline(
+            project_meta=project_meta,
+            file_tree=file_tree,
+            readme=existing_readme,
+            doc_type="dev_guide",
+        )
+        
+        # Stage 2: Generate each section
+        sections_content = []
+        total_sections = len(outline.sections)
+        
+        for i, section in enumerate(outline.sections):
+            # Report progress
+            if progress_callback:
+                progress_callback(section.title, i + 1, total_sections)
+            
+            # Generate section content
+            content = self._generate_section(
+                section=section,
+                custom_requirements=custom_requirements,
+            )
+            sections_content.append(content)
+        
+        # Stage 3: Assemble document
+        return self._assemble_document(outline, sections_content)
+
+    def _generate_single_stage(
+        self,
+        project_meta: ProjectMeta,
+        custom_requirements: Optional[CustomRequirements],
+        existing_readme: Optional[str],
+    ) -> str:
+        """Generate document in a single LLM call (legacy method)."""
         # Build project info
         project_info = self._build_project_info(project_meta)
 
@@ -92,6 +178,157 @@ class DevGuideGenerator:
         )
 
         return document
+
+    def _generate_section(
+        self,
+        section: SectionInfo,
+        custom_requirements: Optional[CustomRequirements] = None,
+    ) -> str:
+        """
+        Generate content for a single section.
+
+        Args:
+            section: Section information.
+            custom_requirements: Custom requirements.
+
+        Returns:
+            Generated section content.
+        """
+        # Build code context for this section
+        code_context = self._build_section_context(section)
+
+        # Build prompt
+        user_prompt = self.prompt_builder.build_section_content_prompt(
+            section=section,
+            code_context=code_context,
+            doc_type="dev_guide",
+        )
+        
+        custom_req_str = None
+        if custom_requirements:
+            custom_req_str = format_requirements_for_prompt(custom_requirements)
+        
+        system_prompt = self.prompt_builder.build_dev_guide_system_prompt(custom_req_str)
+
+        # Generate section content
+        return self.llm_client.generate(
+            prompt=user_prompt,
+            system_prompt=system_prompt,
+        )
+
+    def _build_section_context(self, section: SectionInfo) -> str:
+        """
+        Build code context for a specific section.
+
+        Args:
+            section: Section information.
+
+        Returns:
+            Code context string.
+        """
+        context_parts = []
+        seen_chunks = set()
+        
+        # First, try to get context from relevant files specified in the section
+        if section.relevant_files:
+            for file_path in section.relevant_files:
+                # Search for chunks from this specific file
+                results = self.retriever.search(file_path)
+                for result in results:
+                    if result.chunk.source_file == file_path:
+                        chunk_key = f"{result.chunk.source_file}:{result.chunk.metadata.get('name', '')}"
+                        if chunk_key not in seen_chunks:
+                            seen_chunks.add(chunk_key)
+                            context_parts.append(self._format_chunk(result))
+        
+        # Then, search using section title and description as query
+        query = f"{section.title} {section.description}"
+        results = self.retriever.search(query)
+        
+        for result in results[:10]:
+            chunk_key = f"{result.chunk.source_file}:{result.chunk.metadata.get('name', '')}"
+            if chunk_key not in seen_chunks:
+                seen_chunks.add(chunk_key)
+                context_parts.append(self._format_chunk(result))
+        
+        # Limit context size
+        return self._limit_context(context_parts, self.config.max_section_tokens)
+
+    def _format_chunk(self, result) -> str:
+        """Format a search result chunk for the prompt."""
+        return f"""### {result.chunk.source_file} - {result.chunk.metadata.get('name', result.chunk.chunk_type)}
+
+**类型**: {result.chunk.chunk_type}
+**相关度**: {result.score:.3f}
+
+```
+{result.chunk.content}
+```
+"""
+
+    def _limit_context(self, context_parts: list[str], max_tokens: int) -> str:
+        """Limit context to a maximum number of tokens."""
+        import tiktoken
+        
+        tokenizer = tiktoken.get_encoding("cl100k_base")
+        result_parts = []
+        total_tokens = 0
+        
+        for part in context_parts:
+            part_tokens = len(tokenizer.encode(part))
+            if total_tokens + part_tokens <= max_tokens:
+                result_parts.append(part)
+                total_tokens += part_tokens
+            else:
+                break
+        
+        return "\n---\n".join(result_parts)
+
+    def _build_file_tree(self) -> str:
+        """Build a file tree string from the retriever's chunks."""
+        files = set()
+        for chunk in self.retriever.chunks:
+            files.add(chunk.source_file)
+        
+        # Sort and format
+        sorted_files = sorted(files)
+        return "\n".join(sorted_files)
+
+    def _assemble_document(
+        self,
+        outline: DocOutline,
+        sections_content: list[str],
+    ) -> str:
+        """
+        Assemble the final document from outline and sections.
+
+        Args:
+            outline: Document outline.
+            sections_content: List of generated section contents.
+
+        Returns:
+            Complete document string.
+        """
+        parts = []
+        
+        # Document title
+        parts.append(f"# {outline.title}\n")
+        
+        # Document description
+        if outline.description:
+            parts.append(f"\n{outline.description}\n")
+        
+        # Table of contents
+        parts.append("\n## 目录\n")
+        for i, section in enumerate(outline.sections):
+            anchor = section.title.lower().replace(" ", "-")
+            parts.append(f"- [{section.title}](#{anchor})\n")
+        
+        # Sections
+        for content in sections_content:
+            parts.append(f"\n{content}\n")
+        
+        return "\n".join(parts)
 
     def _build_project_info(self, project_meta: ProjectMeta) -> str:
         """Build project information string."""
@@ -257,3 +494,56 @@ class DevGuideGenerator:
         )
 
         return self.llm_client.generate(prompt=prompt)
+
+    def generate_outline_only(
+        self,
+        project_meta: ProjectMeta,
+        file_tree: Optional[str] = None,
+        existing_readme: Optional[str] = None,
+    ) -> DocOutline:
+        """
+        Generate only the document outline without generating content.
+        
+        Useful for previewing the structure before full generation.
+
+        Args:
+            project_meta: Project metadata.
+            file_tree: Project file tree string.
+            existing_readme: Content of existing README.md.
+
+        Returns:
+            DocOutline object.
+        """
+        if file_tree is None:
+            file_tree = self._build_file_tree()
+        
+        return self.outline_generator.generate_outline(
+            project_meta=project_meta,
+            file_tree=file_tree,
+            readme=existing_readme,
+            doc_type="dev_guide",
+        )
+
+    def generate_section_by_id(
+        self,
+        outline: DocOutline,
+        section_id: str,
+        custom_requirements: Optional[CustomRequirements] = None,
+    ) -> Optional[str]:
+        """
+        Generate a single section by its ID.
+        
+        Useful for regenerating specific sections.
+
+        Args:
+            outline: Document outline.
+            section_id: Section ID to generate.
+            custom_requirements: Custom requirements.
+
+        Returns:
+            Generated section content or None if section not found.
+        """
+        for section in outline.sections:
+            if section.id == section_id:
+                return self._generate_section(section, custom_requirements)
+        return None

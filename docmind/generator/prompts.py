@@ -3,7 +3,10 @@ Prompt templates and builder for document generation.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from .outline import SectionInfo
 
 
 @dataclass
@@ -328,4 +331,183 @@ class PromptBuilder:
 请只输出Mermaid图表代码，不要包含其他解释。图表应该简洁清晰，不要包含过多的细节。
 """
 
+        return prompt
+
+    def build_outline_system_prompt(self, doc_type: str = "dev_guide") -> str:
+        """
+        Build system prompt for outline generation.
+
+        Args:
+            doc_type: Document type ("dev_guide" or "user_guide").
+
+        Returns:
+            System prompt string.
+        """
+        lang = self.get_language_name()
+        doc_type_name = "开发者文档" if doc_type == "dev_guide" else "用户文档"
+
+        prompt = f"""你是一个专业的技术文档架构师。你的任务是分析项目代码结构，规划{doc_type_name}的章节结构。
+
+## 输出要求
+
+1. 输出必须是一个有效的 XML 结构
+2. 不要用 markdown 代码块包裹
+3. 直接输出 XML，不要有任何前言或解释
+4. 使用 {lang} 编写
+
+## 章节设计原则
+
+1. 章节应该覆盖项目的关键方面
+2. 每个章节应该有明确的主题和范围
+3. 章节之间应该有逻辑关系
+4. 为每个章节指定相关的源文件路径
+
+## XML 格式要求
+
+<doc_outline>
+  <title>[文档标题]</title>
+  <description>[项目简短描述]</description>
+  <sections>
+    <section id="section-1">
+      <title>[章节标题]</title>
+      <description>[章节内容描述，说明该章节应该包含什么内容]</description>
+      <importance>high|medium|low</importance>
+      <relevant_files>
+        <file_path>[相关源文件路径]</file_path>
+      </relevant_files>
+      <related_sections>
+        <related>[相关章节ID]</related>
+      </related_sections>
+    </section>
+  </sections>
+</doc_outline>
+"""
+        return prompt
+
+    def build_outline_prompt(
+        self,
+        project_info: str,
+        file_tree: str,
+        readme: str,
+        doc_type: str = "dev_guide",
+    ) -> str:
+        """
+        Build prompt for generating document outline.
+
+        Args:
+            project_info: Project information string.
+            file_tree: Project file tree.
+            readme: README content.
+            doc_type: Document type ("dev_guide" or "user_guide").
+
+        Returns:
+            Prompt string.
+        """
+        doc_type_name = "开发者文档" if doc_type == "dev_guide" else "用户文档"
+        
+        section_templates = self._get_section_templates(doc_type)
+
+        prompt = f"""请分析以下项目信息，为{doc_type_name}设计章节结构。
+
+## 项目信息
+
+{project_info}
+
+## 文件树结构
+
+<file_tree>
+{file_tree}
+</file_tree>
+
+## README 内容
+
+<readme>
+{readme}
+</readme>
+
+## 期望的章节类型
+
+{section_templates}
+
+## 要求
+
+1. 生成 5-8 个章节
+2. 每个章节必须指定相关的源文件路径（从文件树中选择实际存在的文件）
+3. 按 importance 标注章节重要程度（high/medium/low）
+4. 章节之间要有逻辑顺序
+5. 直接输出 XML，不要用 markdown 代码块包裹
+"""
+        return prompt
+
+    def _get_section_templates(self, doc_type: str) -> str:
+        """Get section templates for the document type."""
+        if doc_type == "dev_guide":
+            return """- 项目架构：整体架构概述和模块职责
+- 核心模块详解：核心模块的实现和设计思路
+- API参考：公开API文档，包括类、函数、方法
+- 数据模型：数据结构和数据模型说明
+- 开发指南：开发者贡献指南，环境搭建、测试等"""
+        else:
+            return """- 项目简介：项目用途和核心功能介绍
+- 安装指南：详细的安装步骤和环境要求
+- 快速开始：最小可运行的使用示例
+- 功能模块：按功能模块组织使用说明
+- 配置说明：配置项的解释和使用方法
+- 常见问题：常见使用场景和问题解答"""
+
+    def build_section_content_prompt(
+        self,
+        section: "SectionInfo",
+        code_context: str,
+        doc_type: str = "dev_guide",
+    ) -> str:
+        """
+        Build prompt for generating a single section's content.
+
+        Args:
+            section: SectionInfo object.
+            code_context: Retrieved code context.
+            doc_type: Document type ("dev_guide" or "user_guide").
+
+        Returns:
+            Prompt string.
+        """
+        lang = self.get_language_name()
+        doc_type_name = "开发者文档" if doc_type == "dev_guide" else "用户文档"
+
+        prompt = f"""请为{doc_type_name}生成"{section.title}"章节的详细内容。
+
+## 章节信息
+
+- **标题**: {section.title}
+- **描述**: {section.description}
+- **重要程度**: {section.importance}
+
+## 相关源代码
+
+{code_context}
+
+## 输出要求
+
+1. 使用 {lang} 编写
+2. 使用 Markdown 格式
+3. 章节标题使用 H2 (## {section.title})
+4. 内容要基于提供的源代码，不要臆造
+5. 引用源文件时使用格式：`文件路径:行号`
+
+## Mermaid 图表要求（如适用）
+
+- 架构图使用 `graph TB` 或 `flowchart TB`
+- 类图使用 `classDiagram`
+- 时序图使用 `sequenceDiagram`
+- 图表要简洁清晰，节点名称简短
+
+## 代码示例要求
+
+- 示例代码要完整可运行
+- 使用正确的语法高亮
+- 包含必要的注释说明
+
+请直接输出章节内容，不要有任何前言或结束语。
+"""
         return prompt
