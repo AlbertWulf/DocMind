@@ -355,13 +355,23 @@ def generate(
             with open(readme_path, encoding="utf-8") as f:
                 existing_readme = f.read()
 
+        # Build file tree for outline generation
+        file_tree_lines = []
+        for py_file in sorted(python_files):
+            file_tree_lines.append(str(py_file.relative_to(project_path)))
+        file_tree = "\n".join(file_tree_lines)
+
         # Prepare output
         output_path.mkdir(parents=True, exist_ok=True)
         writer = MarkdownWriter(output_path, project_meta.name or "Project")
 
         # Generate user guide
         if only != "dev":
-            progress.start("Generating user guide...")
+            progress.print("Generating user guide...")
+            
+            def user_progress_callback(section_title: str, current: int, total: int):
+                progress.print_info(f"  [{current}/{total}] {section_title}")
+
             user_gen = UserGuideGenerator(
                 llm_client=llm_client,
                 retriever=retriever,
@@ -376,17 +386,22 @@ def generate(
 
             user_guide = user_gen.generate(
                 project_meta=project_meta,
+                file_tree=file_tree,
                 custom_requirements=custom_requirements,
                 existing_readme=existing_readme,
+                progress_callback=user_progress_callback,
             )
 
             user_path = writer.write_user_guide(user_guide, config.output.user_guide)
-            progress.stop()
             progress.print_success(f"Created {user_path}")
 
         # Generate developer guide
         if only != "user":
-            progress.start("Generating developer guide...")
+            progress.print("Generating developer guide...")
+            
+            def dev_progress_callback(section_title: str, current: int, total: int):
+                progress.print_info(f"  [{current}/{total}] {section_title}")
+
             dev_gen = DevGuideGenerator(
                 llm_client=llm_client,
                 retriever=retriever,
@@ -401,12 +416,13 @@ def generate(
 
             dev_guide = dev_gen.generate(
                 project_meta=project_meta,
+                file_tree=file_tree,
                 custom_requirements=custom_requirements,
                 existing_readme=existing_readme,
+                progress_callback=dev_progress_callback,
             )
 
             dev_path = writer.write_dev_guide(dev_guide, config.output.dev_guide)
-            progress.stop()
             progress.print_success(f"Created {dev_path}")
 
         # Create index
